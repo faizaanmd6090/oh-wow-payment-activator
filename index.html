@@ -17,7 +17,7 @@
         background: #f6f6f7;
       }
       .card {
-        max-width: 640px;
+        max-width: 720px;
         margin: 0 auto;
         background: white;
         border-radius: 12px;
@@ -44,10 +44,11 @@
         margin-top: 20px;
         padding: 14px 16px;
         border-radius: 8px;
-        font-size: 14px;
+        font-size: 13px;
         line-height: 1.5;
         white-space: pre-wrap;
         word-break: break-word;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Cascadia Mono", monospace;
       }
       .status.idle { background: #f1f1f1; color: #6d7175; }
       .status.busy { background: #f1f8fd; color: #00527c; }
@@ -59,6 +60,7 @@
         border-radius: 4px;
         font-size: 12.5px;
       }
+      .diag { margin-top: 12px; font-size: 12px; color: #6d7175; }
     </style>
   </head>
   <body>
@@ -71,14 +73,14 @@
         <li>This activation creates one record under Settings &rarr; Payments &rarr; Payment customizations.</li>
       </ul>
       <button id="activate" type="button">Activate</button>
-      <div id="status" class="status idle">Ready. Open this page from Shopify Admin (Apps or Payment customizations).</div>
+      <div id="status" class="status idle">Ready. Open from Shopify Admin (Apps or Payment customizations).</div>
+      <div id="diag" class="diag"></div>
     </div>
 
     <script>
-      const API_VERSION = "2026-04";
       const TITLE = "Hide Dealer Bank Transfer for non-wholesale";
-
       const statusEl = document.getElementById("status");
+      const diagEl = document.getElementById("diag");
       const btn = document.getElementById("activate");
 
       function setStatus(kind, msg) {
@@ -86,57 +88,41 @@
         statusEl.textContent = msg;
       }
 
-      function getShopDomain() {
+      function showDiagnostics() {
+        const inIframe = window.top !== window.self;
+        const hasShopify = typeof window.shopify === "object" && window.shopify !== null;
+        const hasIdToken = hasShopify && typeof window.shopify.idToken === "function";
+        const hasConfig = hasShopify && typeof window.shopify.config === "object";
         const params = new URLSearchParams(window.location.search);
-        const fromQuery = params.get("shop");
-        if (fromQuery) return fromQuery;
+        const shop = params.get("shop") || (hasConfig ? window.shopify.config.shop : null);
+        const host = params.get("host");
 
-        const config = window.shopify?.config;
-        if (typeof config === "object" && config?.shop) return config.shop;
-
-        return null;
+        diagEl.innerText =
+          `embedded (iframe): ${inIframe}\n` +
+          `window.shopify: ${hasShopify}\n` +
+          `idToken fn: ${hasIdToken}\n` +
+          `shop: ${shop || "(missing)"}\n` +
+          `host param: ${host ? "(present)" : "(missing)"}\n` +
+          `User-Agent: ${navigator.userAgent.slice(0, 80)}`;
       }
 
-      async function getSessionToken() {
-        if (!window.shopify?.idToken) {
-          throw new Error(
-            "App Bridge session not available. Open this page from Shopify Admin (not directly in a browser tab)."
-          );
-        }
-        return window.shopify.idToken();
-      }
-
-      async function gql(query, variables) {
-        const shop = getShopDomain();
-        if (!shop) {
-          throw new Error(
-            "Missing shop domain in URL. Go to Settings → Payments → Payment customizations → Add → hide-dealer-bank-transfer."
-          );
-        }
-
-        const token = await getSessionToken();
-        const res = await fetch(
-          `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${token}`,
-            },
-            body: JSON.stringify({ query, variables: variables || {} }),
-          }
-        );
-
+      async function gqlViaAppBridge(query, variables) {
+        const res = await fetch("shopify:admin/api/graphql.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query, variables: variables || {} }),
+        });
         const text = await res.text();
         let json;
         try {
           json = JSON.parse(text);
-        } catch {
-          throw new Error(`Invalid API response (${res.status}): ${text.slice(0, 300)}`);
+        } catch (parseErr) {
+          throw new Error(
+            `Non-JSON response (HTTP ${res.status}). First 200 chars: ${text.slice(0, 200)}`
+          );
         }
-
         if (!res.ok) {
-          throw new Error(`Admin API HTTP ${res.status}: ${text.slice(0, 300)}`);
+          throw new Error(`Admin API HTTP ${res.status}: ${text.slice(0, 200)}`);
         }
         if (json.errors?.length) {
           throw new Error(json.errors.map((e) => e.message).join("; "));
@@ -145,7 +131,7 @@
       }
 
       async function findFunctionId() {
-        const data = await gql(`
+        const data = await gqlViaAppBridge(`
           query Functions {
             shopifyFunctions(first: 50) {
               edges {
@@ -171,19 +157,17 @@
         });
         if (!match) {
           const names = edges
-            .map((e) => `${e.node.title || "?"} (${e.node.app?.title || "?"})`)
-            .join(", ");
+            .map((e) => `${e.node.title || "?"} / ${e.node.app?.title || "?"}`)
+            .join(" | ");
           throw new Error(
-            "Could not find hide-dealer-bank-transfer function. Found: " +
-              (names || "none") +
-              ". Confirm app is installed and version 4 is released."
+            "Function not found. Available: " + (names || "none")
           );
         }
         return match.node.id;
       }
 
       async function findExistingCustomization(functionId) {
-        const data = await gql(`
+        const data = await gqlViaAppBridge(`
           query Existing {
             paymentCustomizations(first: 50) {
               edges { node { id title enabled functionId } }
@@ -195,7 +179,7 @@
       }
 
       async function createCustomization(functionId) {
-        const data = await gql(
+        const data = await gqlViaAppBridge(
           `
             mutation Create($input: PaymentCustomizationInput!) {
               paymentCustomizationCreate(paymentCustomization: $input) {
@@ -219,10 +203,28 @@
         return result.paymentCustomization;
       }
 
+      async function waitForAppBridge(timeoutMs) {
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+          if (typeof window.shopify === "object" && window.shopify !== null) return true;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        return false;
+      }
+
       btn.addEventListener("click", async () => {
         btn.disabled = true;
+        showDiagnostics();
         try {
-          setStatus("busy", "Connecting to Shopify Admin API...");
+          setStatus("busy", "Waiting for App Bridge...");
+          const ready = await waitForAppBridge(4000);
+          if (!ready) {
+            throw new Error(
+              "App Bridge did not initialize. This page must be opened from inside Shopify Admin (Apps tab or Settings > Payments > Payment customizations), not directly via URL."
+            );
+          }
+
+          setStatus("busy", "Looking up the function...");
           const functionId = await findFunctionId();
 
           setStatus("busy", "Checking for existing customization...");
@@ -231,11 +233,11 @@
             const enabledLabel = existing.enabled ? "and enabled" : "but disabled";
             setStatus(
               "ok",
-              "Already active: customization " +
+              "Already active.\nCustomization: " +
                 existing.id +
-                " exists (" +
+                " (" +
                 enabledLabel +
-                "). No changes made."
+                ").\nNo changes made."
             );
             return;
           }
@@ -244,14 +246,21 @@
           const created = await createCustomization(functionId);
           setStatus(
             "ok",
-            "Activated!\nCustomization id: " +
+            "Activated!\nCustomization: " +
               created.id +
               "\nEnabled: yes\nYou can close this tab and test checkout."
           );
         } catch (err) {
-          setStatus("err", "Activation failed:\n" + (err?.message || String(err)));
+          let msg = err?.message || String(err);
+          if (err?.name) msg = err.name + ": " + msg;
+          if (err?.stack && msg.length < 400) msg += "\n---\n" + err.stack.split("\n").slice(0, 4).join("\n");
+          setStatus("err", "Activation failed:\n" + msg);
           btn.disabled = false;
         }
+      });
+
+      window.addEventListener("load", () => {
+        setTimeout(showDiagnostics, 500);
       });
     </script>
   </body>
