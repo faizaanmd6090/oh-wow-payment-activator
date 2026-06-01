@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="shopify-api-key" content="0a48eea74228760885a10f82908113bb" />
     <title>Hide Dealer Bank Transfer - Activator</title>
     <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
     <style>
@@ -45,6 +46,8 @@
         border-radius: 8px;
         font-size: 14px;
         line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-word;
       }
       .status.idle { background: #f1f1f1; color: #6d7175; }
       .status.busy { background: #f1f8fd; color: #00527c; }
@@ -68,12 +71,11 @@
         <li>This activation creates one record under Settings &rarr; Payments &rarr; Payment customizations.</li>
       </ul>
       <button id="activate" type="button">Activate</button>
-      <div id="status" class="status idle">Not yet activated.</div>
+      <div id="status" class="status idle">Ready. Open this page from Shopify Admin (Apps or Payment customizations).</div>
     </div>
 
     <script>
-      const FUNCTION_HANDLE = "hide-dealer-bank-transfer";
-      const TARGET = "cart.payment-methods.transform.run";
+      const API_VERSION = "2026-04";
       const TITLE = "Hide Dealer Bank Transfer for non-wholesale";
 
       const statusEl = document.getElementById("status");
@@ -84,14 +86,61 @@
         statusEl.textContent = msg;
       }
 
+      function getShopDomain() {
+        const params = new URLSearchParams(window.location.search);
+        const fromQuery = params.get("shop");
+        if (fromQuery) return fromQuery;
+
+        const config = window.shopify?.config;
+        if (typeof config === "object" && config?.shop) return config.shop;
+
+        return null;
+      }
+
+      async function getSessionToken() {
+        if (!window.shopify?.idToken) {
+          throw new Error(
+            "App Bridge session not available. Open this page from Shopify Admin (not directly in a browser tab)."
+          );
+        }
+        return window.shopify.idToken();
+      }
+
       async function gql(query, variables) {
-        const res = await fetch("shopify:admin/api/graphql.json", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query, variables: variables || {} }),
-        });
-        const json = await res.json();
-        if (json.errors) throw new Error(JSON.stringify(json.errors));
+        const shop = getShopDomain();
+        if (!shop) {
+          throw new Error(
+            "Missing shop domain in URL. Go to Settings → Payments → Payment customizations → Add → hide-dealer-bank-transfer."
+          );
+        }
+
+        const token = await getSessionToken();
+        const res = await fetch(
+          `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({ query, variables: variables || {} }),
+          }
+        );
+
+        const text = await res.text();
+        let json;
+        try {
+          json = JSON.parse(text);
+        } catch {
+          throw new Error(`Invalid API response (${res.status}): ${text.slice(0, 300)}`);
+        }
+
+        if (!res.ok) {
+          throw new Error(`Admin API HTTP ${res.status}: ${text.slice(0, 300)}`);
+        }
+        if (json.errors?.length) {
+          throw new Error(json.errors.map((e) => e.message).join("; "));
+        }
         return json.data;
       }
 
@@ -99,18 +148,35 @@
         const data = await gql(`
           query Functions {
             shopifyFunctions(first: 50) {
-              edges { node { id title apiType app { title } } }
+              edges {
+                node {
+                  id
+                  title
+                  apiType
+                  app { title }
+                }
+              }
             }
           }
         `);
-        const edges = data.shopifyFunctions.edges || [];
-        const match = edges.find((e) =>
-          (e.node.title || "").toLowerCase().includes("hide-dealer-bank-transfer") ||
-          (e.node.title || "").toLowerCase().includes("dealer bank transfer")
-        );
+        const edges = data.shopifyFunctions?.edges || [];
+        const match = edges.find((e) => {
+          const title = (e.node.title || "").toLowerCase();
+          const appTitle = (e.node.app?.title || "").toLowerCase();
+          return (
+            title.includes("hide-dealer-bank-transfer") ||
+            title.includes("dealer bank") ||
+            appTitle.includes("oh-wow-payment-customization")
+          );
+        });
         if (!match) {
+          const names = edges
+            .map((e) => `${e.node.title || "?"} (${e.node.app?.title || "?"})`)
+            .join(", ");
           throw new Error(
-            "Could not find the hide-dealer-bank-transfer function in this store. Make sure the app is installed and the latest version is released."
+            "Could not find hide-dealer-bank-transfer function. Found: " +
+              (names || "none") +
+              ". Confirm app is installed and version 4 is released."
           );
         }
         return match.node.id;
@@ -147,7 +213,7 @@
           }
         );
         const result = data.paymentCustomizationCreate;
-        if (result.userErrors && result.userErrors.length > 0) {
+        if (result.userErrors?.length) {
           throw new Error(result.userErrors.map((e) => e.message).join("; "));
         }
         return result.paymentCustomization;
@@ -156,7 +222,7 @@
       btn.addEventListener("click", async () => {
         btn.disabled = true;
         try {
-          setStatus("busy", "Looking up the function...");
+          setStatus("busy", "Connecting to Shopify Admin API...");
           const functionId = await findFunctionId();
 
           setStatus("busy", "Checking for existing customization...");
@@ -165,9 +231,9 @@
             const enabledLabel = existing.enabled ? "and enabled" : "but disabled";
             setStatus(
               "ok",
-              "Already active: a payment customization for this function exists (id " +
+              "Already active: customization " +
                 existing.id +
-                " " +
+                " exists (" +
                 enabledLabel +
                 "). No changes made."
             );
@@ -178,12 +244,12 @@
           const created = await createCustomization(functionId);
           setStatus(
             "ok",
-            "Activated! Customization id " +
+            "Activated!\nCustomization id: " +
               created.id +
-              " created and enabled. You can close this tab."
+              "\nEnabled: yes\nYou can close this tab and test checkout."
           );
         } catch (err) {
-          setStatus("err", "Activation failed: " + (err?.message || String(err)));
+          setStatus("err", "Activation failed:\n" + (err?.message || String(err)));
           btn.disabled = false;
         }
       });
