@@ -37,9 +37,14 @@
         font-size: 14px;
         font-weight: 600;
         cursor: pointer;
+        margin-right: 8px;
       }
       button:hover { background: #006e52; }
       button:disabled { background: #aab; cursor: not-allowed; }
+      button.stop {
+        background: #d72c0d;
+      }
+      button.stop:hover { background: #b22408; }
       .status {
         margin-top: 20px;
         padding: 14px 16px;
@@ -73,6 +78,7 @@
         <li>This activation creates one record under Settings &rarr; Payments &rarr; Payment customizations.</li>
       </ul>
       <button id="activate" type="button">Activate</button>
+      <button id="stop" class="stop" type="button">Stop (deactivate &amp; remove)</button>
       <div id="status" class="status idle">Ready. Open from Shopify Admin (Apps or Payment customizations).</div>
       <div id="diag" class="diag"></div>
     </div>
@@ -82,6 +88,7 @@
       const statusEl = document.getElementById("status");
       const diagEl = document.getElementById("diag");
       const btn = document.getElementById("activate");
+      const stopBtn = document.getElementById("stop");
 
       function setStatus(kind, msg) {
         statusEl.className = "status " + kind;
@@ -256,6 +263,83 @@
           if (err?.stack && msg.length < 400) msg += "\n---\n" + err.stack.split("\n").slice(0, 4).join("\n");
           setStatus("err", "Activation failed:\n" + msg);
           btn.disabled = false;
+        }
+      });
+
+      async function deleteCustomization(id) {
+        const data = await gqlViaAppBridge(
+          `
+            mutation Delete($id: ID!) {
+              paymentCustomizationDelete(id: $id) {
+                deletedId
+                userErrors { field message }
+              }
+            }
+          `,
+          { id }
+        );
+        const result = data.paymentCustomizationDelete;
+        if (result.userErrors?.length) {
+          throw new Error(result.userErrors.map((e) => e.message).join("; "));
+        }
+        return result.deletedId;
+      }
+
+      stopBtn.addEventListener("click", async () => {
+        const ok = window.confirm(
+          "Stop the Dealer Bank Transfer hide rule?\n\n" +
+          "This will DELETE the payment customization, so:\n" +
+          "  - Dealer Bank Transfer will become visible to ALL customers (guests, D2C, dealers).\n" +
+          "  - You can re-activate later by clicking Activate again.\n\n" +
+          "Continue?"
+        );
+        if (!ok) return;
+
+        stopBtn.disabled = true;
+        btn.disabled = true;
+        showDiagnostics();
+        try {
+          setStatus("busy", "Waiting for App Bridge...");
+          const ready = await waitForAppBridge(4000);
+          if (!ready) {
+            throw new Error(
+              "App Bridge did not initialize. Open this page from inside Shopify Admin."
+            );
+          }
+
+          setStatus("busy", "Looking up the function...");
+          const functionId = await findFunctionId();
+
+          setStatus("busy", "Looking for an existing customization...");
+          const existing = await findExistingCustomization(functionId);
+          if (!existing) {
+            setStatus(
+              "ok",
+              "Nothing to stop. No payment customization is currently registered for this function.\n" +
+              "Checkout is already in default state."
+            );
+            btn.disabled = false;
+            stopBtn.disabled = false;
+            return;
+          }
+
+          setStatus("busy", "Deleting customization " + existing.id + "...");
+          const deletedId = await deleteCustomization(existing.id);
+          setStatus(
+            "ok",
+            "Stopped.\nDeleted customization: " +
+              (deletedId || existing.id) +
+              "\nDealer Bank Transfer is no longer hidden from non-wholesale customers."
+          );
+          btn.disabled = false;
+        } catch (err) {
+          let msg = err?.message || String(err);
+          if (err?.name) msg = err.name + ": " + msg;
+          if (err?.stack && msg.length < 400)
+            msg += "\n---\n" + err.stack.split("\n").slice(0, 4).join("\n");
+          setStatus("err", "Stop failed:\n" + msg);
+          btn.disabled = false;
+          stopBtn.disabled = false;
         }
       });
 
