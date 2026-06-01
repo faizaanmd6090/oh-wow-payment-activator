@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hide Dealer Bank Transfer - Activator</title>
+    <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
+    <style>
+      :root {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        color: #202223;
+      }
+      body {
+        margin: 0;
+        padding: 32px;
+        background: #f6f6f7;
+      }
+      .card {
+        max-width: 640px;
+        margin: 0 auto;
+        background: white;
+        border-radius: 12px;
+        padding: 28px 32px;
+        box-shadow: 0 1px 0 rgba(0, 0, 0, 0.05);
+      }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      p.subtitle { margin: 0 0 24px; color: #6d7175; font-size: 13px; }
+      ul { padding-left: 18px; margin: 0 0 24px; }
+      li { margin-bottom: 6px; font-size: 14px; }
+      button {
+        background: #008060;
+        color: white;
+        border: 0;
+        border-radius: 8px;
+        padding: 12px 18px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:hover { background: #006e52; }
+      button:disabled { background: #aab; cursor: not-allowed; }
+      .status {
+        margin-top: 20px;
+        padding: 14px 16px;
+        border-radius: 8px;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      .status.idle { background: #f1f1f1; color: #6d7175; }
+      .status.busy { background: #f1f8fd; color: #00527c; }
+      .status.ok { background: #e3f1df; color: #1f5d2c; }
+      .status.err { background: #fde2dd; color: #8e0b0b; }
+      code {
+        background: #f1f1f1;
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-size: 12.5px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Hide Dealer Bank Transfer for non-wholesale customers</h1>
+      <p class="subtitle">One-time activation. Click Activate once and you can close this tab.</p>
+      <ul>
+        <li>Customers <strong>with</strong> the <code>wholesale</code> tag will see <strong>Dealer Bank Transfer</strong> at checkout.</li>
+        <li>Everyone else (guests, regular customers) will <strong>not</strong> see it.</li>
+        <li>This activation creates one record under Settings &rarr; Payments &rarr; Payment customizations.</li>
+      </ul>
+      <button id="activate" type="button">Activate</button>
+      <div id="status" class="status idle">Not yet activated.</div>
+    </div>
+
+    <script>
+      const FUNCTION_HANDLE = "hide-dealer-bank-transfer";
+      const TARGET = "cart.payment-methods.transform.run";
+      const TITLE = "Hide Dealer Bank Transfer for non-wholesale";
+
+      const statusEl = document.getElementById("status");
+      const btn = document.getElementById("activate");
+
+      function setStatus(kind, msg) {
+        statusEl.className = "status " + kind;
+        statusEl.textContent = msg;
+      }
+
+      async function gql(query, variables) {
+        const res = await fetch("shopify:admin/api/graphql.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query, variables: variables || {} }),
+        });
+        const json = await res.json();
+        if (json.errors) throw new Error(JSON.stringify(json.errors));
+        return json.data;
+      }
+
+      async function findFunctionId() {
+        const data = await gql(`
+          query Functions {
+            shopifyFunctions(first: 50) {
+              edges { node { id title apiType app { title } } }
+            }
+          }
+        `);
+        const edges = data.shopifyFunctions.edges || [];
+        const match = edges.find((e) =>
+          (e.node.title || "").toLowerCase().includes("hide-dealer-bank-transfer") ||
+          (e.node.title || "").toLowerCase().includes("dealer bank transfer")
+        );
+        if (!match) {
+          throw new Error(
+            "Could not find the hide-dealer-bank-transfer function in this store. Make sure the app is installed and the latest version is released."
+          );
+        }
+        return match.node.id;
+      }
+
+      async function findExistingCustomization(functionId) {
+        const data = await gql(`
+          query Existing {
+            paymentCustomizations(first: 50) {
+              edges { node { id title enabled functionId } }
+            }
+          }
+        `);
+        const edges = data.paymentCustomizations?.edges || [];
+        return edges.find((e) => e.node.functionId === functionId)?.node || null;
+      }
+
+      async function createCustomization(functionId) {
+        const data = await gql(
+          `
+            mutation Create($input: PaymentCustomizationInput!) {
+              paymentCustomizationCreate(paymentCustomization: $input) {
+                paymentCustomization { id title enabled functionId }
+                userErrors { field message }
+              }
+            }
+          `,
+          {
+            input: {
+              title: TITLE,
+              enabled: true,
+              functionId: functionId,
+            },
+          }
+        );
+        const result = data.paymentCustomizationCreate;
+        if (result.userErrors && result.userErrors.length > 0) {
+          throw new Error(result.userErrors.map((e) => e.message).join("; "));
+        }
+        return result.paymentCustomization;
+      }
+
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          setStatus("busy", "Looking up the function...");
+          const functionId = await findFunctionId();
+
+          setStatus("busy", "Checking for existing customization...");
+          const existing = await findExistingCustomization(functionId);
+          if (existing) {
+            const enabledLabel = existing.enabled ? "and enabled" : "but disabled";
+            setStatus(
+              "ok",
+              "Already active: a payment customization for this function exists (id " +
+                existing.id +
+                " " +
+                enabledLabel +
+                "). No changes made."
+            );
+            return;
+          }
+
+          setStatus("busy", "Creating payment customization...");
+          const created = await createCustomization(functionId);
+          setStatus(
+            "ok",
+            "Activated! Customization id " +
+              created.id +
+              " created and enabled. You can close this tab."
+          );
+        } catch (err) {
+          setStatus("err", "Activation failed: " + (err?.message || String(err)));
+          btn.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>
